@@ -1,0 +1,8 @@
+{
+  "MakeMKV": "C:\\Program Files (x86)\\MakeMKV\\makemkvcon64.exe",
+  "RipRoot": "C:\\DVD_Rip_Work\\INBOX",
+  "PollSeconds": 5,
+  "TitlePromptSeconds": 15,
+  "TMDbApiKey": "YOUR_TMDB_API_KEY_HERE",
+  "UseTMDbLookup": true
+}
