@@ -57,16 +57,48 @@ function Get-TMDbMovieTitle([string]$searchQuery, [int]$year) {
                 $bestYear = $matches[1]
             }
             
-            if ($bestYear) {
-                return "$bestTitle ($bestYear)"
+            $formattedTitle = if ($bestYear) { "$bestTitle ($bestYear)" } else { $bestTitle }
+            
+            # Return object with title and ID
+            return [PSCustomObject]@{
+                Title = $formattedTitle
+                MovieId = $bestMatch.id
             }
-            return $bestTitle
         } else {
             Write-Host "`nNo results found." -ForegroundColor Red
             return $null
         }
     } catch {
         Write-Host "`nError: $($_.Exception.Message)" -ForegroundColor Red
+        if ($_.Exception.Response) {
+            Write-Host "Status Code: $($_.Exception.Response.StatusCode.Value__)" -ForegroundColor Red
+        }
+        return $null
+    }
+}
+
+function Get-TMDbMovieDetails([int]$movieId) {
+    if ($TMDbApiKey -eq "YOUR_TMDB_API_KEY_HERE") {
+        Write-Error "Please set your TMDb API key in the script first!"
+        return $null
+    }
+    
+    if (-not $movieId -or $movieId -le 0) {
+        Write-Error "Invalid movie ID: $movieId"
+        return $null
+    }
+
+    try {
+        $url = "https://api.themoviedb.org/3/movie/${movieId}?api_key=$TMDbApiKey&language=en-US"
+        
+        Write-Host "`nQuerying TMDb API for movie details..." -ForegroundColor Cyan
+        Write-Host "Movie ID: $movieId" -ForegroundColor Gray
+        Write-Host "URL: $($url -replace $TMDbApiKey, '***API_KEY***')" -ForegroundColor Gray
+
+        $response = Invoke-RestMethod -Uri $url -Method Get -ErrorAction Stop
+        return $response
+    } catch {
+        Write-Host "`nError fetching movie details: $($_.Exception.Message)" -ForegroundColor Red
         if ($_.Exception.Response) {
             Write-Host "Status Code: $($_.Exception.Response.StatusCode.Value__)" -ForegroundColor Red
         }
@@ -105,7 +137,9 @@ function Show-TestMenu {
     Write-Host "==================================" -ForegroundColor Cyan
     Write-Host "1. Test predefined disc labels"
     Write-Host "2. Custom search"
-    Write-Host "3. Test API connection"
+    Write-Host "3. Test detailed movie info (by ID)"
+    Write-Host "4. Test search + detailed info flow"
+    Write-Host "5. Test API connection"
     Write-Host "Q. Quit"
     Write-Host ""
 }
@@ -132,7 +166,8 @@ function Test-PredefinedLabels {
         $result = Get-TMDbMovieTitle -searchQuery $test.Label -year $test.Year
         
         if ($result) {
-            Write-Host "`n[MATCH] $result" -ForegroundColor Green -BackgroundColor Black
+            Write-Host "`n[MATCH] $($result.Title)" -ForegroundColor Green -BackgroundColor Black
+            Write-Host "[ID] Movie ID: $($result.MovieId)" -ForegroundColor Gray
         } else {
             Write-Host "`n[NO MATCH] No match found" -ForegroundColor Red
         }
@@ -162,10 +197,136 @@ function Test-CustomSearch {
     $result = Get-TMDbMovieTitle -searchQuery $searchQuery -year $year
     
     if ($result) {
-        Write-Host "`n[MATCH] $result" -ForegroundColor Green -BackgroundColor Black
+        Write-Host "`n[MATCH] $($result.Title)" -ForegroundColor Green -BackgroundColor Black
+        Write-Host "[ID] Movie ID: $($result.MovieId)" -ForegroundColor Gray
     } else {
         Write-Host "`n[NO MATCH] No match found" -ForegroundColor Red
     }
+}
+
+function Test-MovieDetails {
+    Write-Host "`n==================================" -ForegroundColor Cyan
+    Write-Host "Test Get-TMDbMovieDetails" -ForegroundColor Cyan
+    Write-Host "==================================" -ForegroundColor Cyan
+    
+    $movieIdInput = Read-Host "`nEnter TMDb Movie ID (or press Enter for Die Hard = 562)"
+    $movieId = if ([string]::IsNullOrWhiteSpace($movieIdInput)) { 562 } else { [int]$movieIdInput }
+    
+    Write-Host "`nFetching detailed info for Movie ID: $movieId" -ForegroundColor Yellow
+    
+    $details = Get-TMDbMovieDetails -movieId $movieId
+    
+    if ($details) {
+        Write-Host "`n==================================" -ForegroundColor Green
+        Write-Host "Movie Details Retrieved Successfully" -ForegroundColor Green
+        Write-Host "==================================" -ForegroundColor Green
+        
+        Write-Host "`nBasic Info:" -ForegroundColor Cyan
+        Write-Host "  Title: $($details.title)" -ForegroundColor White
+        Write-Host "  Original Title: $($details.original_title)" -ForegroundColor Gray
+        Write-Host "  Release Date: $($details.release_date)" -ForegroundColor White
+        Write-Host "  Runtime: $($details.runtime) minutes" -ForegroundColor White
+        Write-Host "  Status: $($details.status)" -ForegroundColor White
+        Write-Host "  Tagline: $($details.tagline)" -ForegroundColor Gray
+        
+        Write-Host "`nRatings:" -ForegroundColor Cyan
+        Write-Host "  Vote Average: $($details.vote_average)/10" -ForegroundColor White
+        Write-Host "  Vote Count: $($details.vote_count)" -ForegroundColor White
+        Write-Host "  Popularity: $($details.popularity)" -ForegroundColor White
+        
+        Write-Host "`nFinancials:" -ForegroundColor Cyan
+        Write-Host "  Budget: `$$($details.budget.ToString('N0'))" -ForegroundColor White
+        Write-Host "  Revenue: `$$($details.revenue.ToString('N0'))" -ForegroundColor White
+        
+        if ($details.genres -and $details.genres.Count -gt 0) {
+            Write-Host "`nGenres:" -ForegroundColor Cyan
+            foreach ($genre in $details.genres) {
+                Write-Host "  - $($genre.name)" -ForegroundColor White
+            }
+        }
+        
+        if ($details.production_companies -and $details.production_companies.Count -gt 0) {
+            Write-Host "`nProduction Companies:" -ForegroundColor Cyan
+            foreach ($company in $details.production_companies) {
+                Write-Host "  - $($company.name)" -ForegroundColor White
+            }
+        }
+        
+        if ($details.spoken_languages -and $details.spoken_languages.Count -gt 0) {
+            Write-Host "`nLanguages:" -ForegroundColor Cyan
+            $languages = ($details.spoken_languages | ForEach-Object { $_.english_name }) -join ", "
+            Write-Host "  $languages" -ForegroundColor White
+        }
+        
+        Write-Host "`nOverview:" -ForegroundColor Cyan
+        Write-Host "  $($details.overview)" -ForegroundColor White
+        
+        Write-Host "`nAPI Response Keys:" -ForegroundColor Cyan
+        $keys = ($details.PSObject.Properties | Select-Object -ExpandProperty Name) -join ", "
+        Write-Host "  $keys" -ForegroundColor Gray
+        
+    } else {
+        Write-Host "`n[ERROR] Failed to retrieve movie details" -ForegroundColor Red
+    }
+}
+
+function Test-SearchAndDetails {
+    Write-Host "`n==================================" -ForegroundColor Cyan
+    Write-Host "Test Complete Search + Details Flow" -ForegroundColor Cyan
+    Write-Host "==================================" -ForegroundColor Cyan
+    Write-Host "This tests the full workflow: Search -> Get ID -> Fetch Details" -ForegroundColor Gray
+    
+    $searchQuery = Read-Host "`nEnter movie title to search"
+    if ([string]::IsNullOrWhiteSpace($searchQuery)) {
+        Write-Host "Search cancelled." -ForegroundColor Yellow
+        return
+    }
+    
+    $yearInput = Read-Host "Enter year (optional - press Enter to skip)"
+    $year = $null
+    if (![string]::IsNullOrWhiteSpace($yearInput) -and $yearInput -match '^\d{4}$') {
+        $year = [int]$yearInput
+    }
+    
+    # Step 1: Search for movie
+    Write-Host "`n[STEP 1] Searching for movie..." -ForegroundColor Yellow
+    $searchResult = Get-TMDbMovieTitle -searchQuery $searchQuery -year $year
+    
+    if (-not $searchResult) {
+        Write-Host "`n[FAILED] No search results found" -ForegroundColor Red
+        return
+    }
+    
+    Write-Host "`n[SUCCESS] Found: $($searchResult.Title)" -ForegroundColor Green
+    Write-Host "[SUCCESS] Movie ID: $($searchResult.MovieId)" -ForegroundColor Green
+    
+    # Step 2: Fetch detailed info
+    Write-Host "`n[STEP 2] Fetching detailed movie info..." -ForegroundColor Yellow
+    $details = Get-TMDbMovieDetails -movieId $searchResult.MovieId
+    
+    if (-not $details) {
+        Write-Host "`n[FAILED] Could not fetch detailed info" -ForegroundColor Red
+        return
+    }
+    
+    Write-Host "`n[SUCCESS] Retrieved detailed info!" -ForegroundColor Green
+    
+    # Display key details
+    Write-Host "`n==================================" -ForegroundColor Cyan
+    Write-Host "Complete Movie Information" -ForegroundColor Cyan
+    Write-Host "==================================" -ForegroundColor Cyan
+    Write-Host "Title: $($details.title) ($($details.release_date))" -ForegroundColor White
+    Write-Host "Runtime: $($details.runtime) min | Rating: $($details.vote_average)/10" -ForegroundColor White
+    Write-Host "Budget: `$$($details.budget.ToString('N0')) | Revenue: `$$($details.revenue.ToString('N0'))" -ForegroundColor White
+    
+    if ($details.genres) {
+        $genreNames = ($details.genres | ForEach-Object { $_.name }) -join ", "
+        Write-Host "Genres: $genreNames" -ForegroundColor White
+    }
+    
+    Write-Host "`nOverview: $($details.overview)" -ForegroundColor Gray
+    
+    Write-Host "`n[SUCCESS] Complete workflow validated!" -ForegroundColor Green -BackgroundColor Black
 }
 
 # Main test loop
@@ -181,7 +342,9 @@ while ($true) {
     switch ($choice.ToUpper()) {
         "1" { Test-PredefinedLabels }
         "2" { Test-CustomSearch }
-        "3" { Test-TMDbConnection }
+        "3" { Test-MovieDetails }
+        "4" { Test-SearchAndDetails }
+        "5" { Test-TMDbConnection }
         "Q" { 
             Write-Host "`nExiting test harness..." -ForegroundColor Yellow
             exit 
