@@ -4,8 +4,50 @@
 # ============================
 
 param(
-    [int]$MinLengthSeconds = 3600  # 1 hour: main movie heuristic
+    [int]$MinLengthSeconds = 3600,  # 1 hour: main movie heuristic
+    [switch]$UpdateTitleInfo,       # Update titleinfo.json for existing rips
+    [switch]$Help                   # Display help information
 )
+
+# Display help if requested
+if ($Help) {
+    Write-Host "`nMakeMKV Auto-Rip Script" -ForegroundColor Cyan
+    Write-Host "========================`n" -ForegroundColor Cyan
+    Write-Host "DESCRIPTION:" -ForegroundColor Yellow
+    Write-Host "  Automatically rips DVDs and Blu-rays using MakeMKV."
+    Write-Host "  Detects disc insertion, extracts main movie, ejects, and waits for next disc.`n"
+    
+    Write-Host "PARAMETERS:" -ForegroundColor Yellow
+    Write-Host "  -MinLengthSeconds <int>" -ForegroundColor Green
+    Write-Host "      Minimum track length in seconds to consider as main movie."
+    Write-Host "      Default: 3600 (1 hour)"
+    Write-Host "      Example: .\makemkv-autorip.ps1 -MinLengthSeconds 5400`n"
+    
+    Write-Host "  -UpdateTitleInfo" -ForegroundColor Green
+    Write-Host "      Update titleinfo.json files for existing rips in the rip root directory."
+    Write-Host "      Searches TMDb for each folder and creates titleinfo.json if missing."
+    Write-Host "      Requires TMDb lookup to be enabled in settings.json."
+    Write-Host "      Example: .\makemkv-autorip.ps1 -UpdateTitleInfo`n"
+    
+    Write-Host "  -Help" -ForegroundColor Green
+    Write-Host "      Display this help information.`n"
+    
+    Write-Host "CONFIGURATION:" -ForegroundColor Yellow
+    Write-Host "  Settings are loaded from settings.json (copy from settings.example.json)"
+    Write-Host "  Configure MakeMKV path, rip directory, TMDb API key, and other options.`n"
+    
+    Write-Host "EXAMPLES:" -ForegroundColor Yellow
+    Write-Host "  .\makemkv-autorip.ps1"
+    Write-Host "      Start auto-rip with default settings`n"
+    
+    Write-Host "  .\makemkv-autorip.ps1 -MinLengthSeconds 5400"
+    Write-Host "      Start auto-rip requiring 90-minute minimum track length`n"
+    
+    Write-Host "  .\makemkv-autorip.ps1 -UpdateTitleInfo"
+    Write-Host "      Update titleinfo.json for all existing rips`n"
+    
+    exit 0
+}
 
 # Load settings from JSON file or use defaults
 $settingsFile = Join-Path $PSScriptRoot "settings.json"
@@ -117,13 +159,38 @@ function Get-TMDbMovieTitle([string]$searchQuery, [int]$year) {
                 $releaseYear = $matches[1]
             }
             
-            if ($releaseYear) {
-                return "$title ($releaseYear)"
+            $formattedTitle = if ($releaseYear) { "$title ($releaseYear)" } else { $title }
+            
+            # Return the formatted title, movie ID, and basic movie data
+            return [PSCustomObject]@{
+                Title = $formattedTitle
+                MovieId = $movie.id
+                MovieData = $movie
             }
-            return $title
         }
     } catch {
         Write-Warning "TMDb lookup failed: $($_.Exception.Message)"
+    }
+
+    return $null
+}
+
+function Get-TMDbMovieDetails([int]$movieId) {
+    if (-not $UseTMDbLookup -or $TMDbApiKey -eq "YOUR_TMDB_API_KEY_HERE") {
+        return $null
+    }
+    
+    if (-not $movieId -or $movieId -le 0) {
+        Write-Warning "Invalid movie ID provided to Get-TMDbMovieDetails"
+        return $null
+    }
+
+    try {
+        $url = "https://api.themoviedb.org/3/movie/${movieId}?api_key=$TMDbApiKey&language=en-US"
+        $response = Invoke-RestMethod -Uri $url -Method Get -ErrorAction Stop
+        return $response
+    } catch {
+        Write-Warning "TMDb details lookup failed: $($_.Exception.Message)"
     }
 
     return $null
@@ -166,7 +233,7 @@ function Get-ProposedTitle {
     }
 
     # Try TMDb lookup if we have a volume label
-    $tmdbTitle = $null
+    $tmdbResult = $null
     if ($volumeLabel) {
         Write-Host "Disc label: $volumeLabel" -ForegroundColor Cyan
         if ($year) {
@@ -182,10 +249,14 @@ function Get-ProposedTitle {
             Write-Host "Cleaned label for search: $cleanedLabel" -ForegroundColor Cyan
         }
         
-        $tmdbTitle = Get-TMDbMovieTitle -searchQuery $cleanedLabel -year $year
-        if ($tmdbTitle) {
-            Write-Host "TMDb lookup found: $tmdbTitle" -ForegroundColor Green
-            return $tmdbTitle
+        $tmdbResult = Get-TMDbMovieTitle -searchQuery $cleanedLabel -year $year
+        if ($tmdbResult) {
+            Write-Host "TMDb lookup found: $($tmdbResult.Title)" -ForegroundColor Green
+            return [PSCustomObject]@{
+                Title = $tmdbResult.Title
+                MovieId = $tmdbResult.MovieId
+                TMDbData = $tmdbResult.MovieData
+            }
         } else {
             Write-Host "TMDb lookup found no results for disc label" -ForegroundColor Yellow
         }
@@ -205,10 +276,14 @@ function Get-ProposedTitle {
                     $searchYearInt = [int]$searchYear
                 }
                 
-                $tmdbTitle = Get-TMDbMovieTitle -searchQuery $searchTitle -year $searchYearInt
-                if ($tmdbTitle) {
-                    Write-Host "TMDb lookup found: $tmdbTitle" -ForegroundColor Green
-                    return $tmdbTitle
+                $tmdbResult = Get-TMDbMovieTitle -searchQuery $searchTitle -year $searchYearInt
+                if ($tmdbResult) {
+                    Write-Host "TMDb lookup found: $($tmdbResult.Title)" -ForegroundColor Green
+                    return [PSCustomObject]@{
+                        Title = $tmdbResult.Title
+                        MovieId = $tmdbResult.MovieId
+                        TMDbData = $tmdbResult.MovieData
+                    }
                 } else {
                     Write-Host "No results found for manual search" -ForegroundColor Yellow
                 }
@@ -216,11 +291,19 @@ function Get-ProposedTitle {
         }
     }
 
-    # Fallback to disc info
+    # Fallback to disc info (no TMDb data)
+    $fallbackTitle = $null
     if ($volumeLabel -and $year) {
-        return "$volumeLabel ($year)"
+        $fallbackTitle = "$volumeLabel ($year)"
     } elseif ($volumeLabel) {
-        return $volumeLabel
+        $fallbackTitle = $volumeLabel
+    }
+    
+    if ($fallbackTitle) {
+        return [PSCustomObject]@{
+            Title = $fallbackTitle
+            TMDbData = $null
+        }
     }
 
     return $null
@@ -298,13 +381,111 @@ function Rename-MkvToTitle([string]$jobDir, [string]$safeTitle) {
     }
 }
 
+function Update-ExistingTitleInfo {
+    Write-Host "Updating title info for existing rips in $RipRoot" -ForegroundColor Cyan
+    Write-Host ""
+    
+    $folders = Get-ChildItem -Path $RipRoot -Directory
+    $processed = 0
+    $skipped = 0
+    $updated = 0
+    
+    foreach ($folder in $folders) {
+        $folderPath = $folder.FullName
+        $folderName = $folder.Name
+        $titleInfoFile = Join-Path $folderPath "titleinfo.json"
+        
+        # Skip if titleinfo.json already exists
+        if (Test-Path $titleInfoFile) {
+            Write-Host "Skipping '$folderName' - titleinfo.json already exists" -ForegroundColor Gray
+            $skipped++
+            continue
+        }
+        
+        Write-Host "Processing '$folderName'..." -ForegroundColor Yellow
+        
+        # Try to parse year from folder name if present
+        $searchTitle = $folderName
+        $searchYear = $null
+        if ($folderName -match '(.+?)\s*\((\d{4})\)') {
+            $searchTitle = $matches[1].Trim()
+            $searchYear = [int]$matches[2]
+            Write-Host "  Parsed title: $searchTitle, Year: $searchYear" -ForegroundColor Cyan
+        }
+        
+        # Search TMDb
+        $tmdbResult = Get-TMDbMovieTitle -searchQuery $searchTitle -year $searchYear
+        
+        if (-not $tmdbResult) {
+            Write-Host "  No TMDb results found for '$searchTitle' - skipping" -ForegroundColor Yellow
+            $skipped++
+            continue
+        }
+        
+        Write-Host "  Found: $($tmdbResult.Title)" -ForegroundColor Green
+        
+        # Fetch detailed movie info
+        Write-Host "  Fetching detailed movie info..." -ForegroundColor Cyan
+        $detailedMovieData = Get-TMDbMovieDetails -movieId $tmdbResult.MovieId
+        
+        if (-not $detailedMovieData) {
+            Write-Host "  Failed to fetch detailed movie info - skipping" -ForegroundColor Yellow
+            $skipped++
+            continue
+        }
+        
+        # Try to detect disc type from existing metadata or structure
+        $discType = "UNKNOWN"
+        
+        # Check for old .disctype file
+        $oldDiscTypeFile = Join-Path $folderPath ".disctype"
+        if (Test-Path $oldDiscTypeFile) {
+            $discType = (Get-Content $oldDiscTypeFile -Raw).Trim()
+            Write-Host "  Disc type from legacy file: $discType" -ForegroundColor Cyan
+        }
+        
+        # Build title info with detailed TMDb data
+        $titleInfo = $detailedMovieData
+        $titleInfo | Add-Member -NotePropertyName "disctype" -NotePropertyValue $discType -Force
+        $titleInfo | Add-Member -NotePropertyName "title" -NotePropertyValue $tmdbResult.Title -Force
+        
+        # Save title info
+        $titleInfo | ConvertTo-Json -Depth 10 | Set-Content -Path $titleInfoFile
+        Write-Host "  Created titleinfo.json" -ForegroundColor Green
+        $updated++
+        $processed++
+        Write-Host ""
+    }
+    
+    Write-Host "============================" -ForegroundColor Cyan
+    Write-Host "Update complete!" -ForegroundColor Green
+    Write-Host "  Processed: $processed"
+    Write-Host "  Updated: $updated"
+    Write-Host "  Skipped: $skipped"
+    Write-Host "============================"
+}
+
+# Check if we're in update mode
+if ($UpdateTitleInfo) {
+    if (-not $UseTMDbLookup -or $TMDbApiKey -eq "YOUR_TMDB_API_KEY_HERE") {
+        Write-Error "TMDb lookup must be enabled to update title info. Please configure TMDbApiKey in settings.json."
+        exit 1
+    }
+    
+    Update-ExistingTitleInfo
+    exit 0
+}
+
 Write-Host "MakeMKV auto-rip started. Waiting for disc..."
 
 while ($true) {
     $dvd = Get-DvdDrive
 
     if ($dvd) {
-        $proposedTitle = Get-ProposedTitle
+        $proposedTitleObj = Get-ProposedTitle
+        $proposedTitle = if ($proposedTitleObj) { $proposedTitleObj.Title } else { $null }
+        $movieId = if ($proposedTitleObj) { $proposedTitleObj.MovieId } else { $null }
+        
         $userTitle = Get-UserTitle -proposedTitle $proposedTitle
         $safeTitle = Get-SafeName $userTitle
 
@@ -316,11 +497,36 @@ while ($true) {
         $jobDir = Get-UniqueDirectory -root $RipRoot -name $safeTitle
         New-Item -ItemType Directory -Force -Path $jobDir | Out-Null
 
-        # Detect and save disc type
+        # Detect disc type
         $discType = Get-DiscType
-        $discTypeFile = Join-Path $jobDir ".disctype"
-        Set-Content -Path $discTypeFile -Value $discType
         Write-Host "Detected disc type: $discType" -ForegroundColor Cyan
+        
+        # Build comprehensive title info metadata
+        $titleInfo = [PSCustomObject]@{
+            disctype = $discType
+            title = $userTitle
+        }
+        
+        # If user accepted TMDb result, fetch detailed movie info
+        if ($movieId -and ($userTitle -eq $proposedTitle)) {
+            Write-Host "Fetching detailed movie info from TMDb..." -ForegroundColor Cyan
+            $detailedMovieData = Get-TMDbMovieDetails -movieId $movieId
+            
+            if ($detailedMovieData) {
+                # Use the detailed movie data and inject disctype and title
+                $detailedMovieData | Add-Member -NotePropertyName "disctype" -NotePropertyValue $discType -Force
+                $detailedMovieData | Add-Member -NotePropertyName "title" -NotePropertyValue $userTitle -Force
+                $titleInfo = $detailedMovieData
+                Write-Host "Detailed movie info retrieved" -ForegroundColor Green
+            } else {
+                Write-Warning "Failed to fetch detailed movie info, using basic metadata"
+            }
+        }
+        
+        # Save title info as JSON
+        $titleInfoFile = Join-Path $jobDir "titleinfo.json"
+        $titleInfo | ConvertTo-Json -Depth 10 | Set-Content -Path $titleInfoFile
+        Write-Host "Saved title info to titleinfo.json" -ForegroundColor Cyan
 
         Write-Host "Disc detected in $($dvd.Drive). Ripping to $jobDir"
 

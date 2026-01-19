@@ -9,22 +9,42 @@ $PresetDVD       = "HQ 480p30 Surround"
 $PresetBluRay    = "HQ 1080p30 Surround"
 $Container       = "jlesage/handbrake"
 function Get-PresetForSource([string]$ripFolder, [string]$mkvFile) {
-    # First, check for .disctype metadata file
+    # Check for titleinfo.json metadata file
+    $titleInfoFile = Join-Path $ripFolder "titleinfo.json"
+    if (Test-Path $titleInfoFile) {
+        try {
+            $titleInfo = Get-Content $titleInfoFile -Raw | ConvertFrom-Json
+            $discType = $titleInfo.disctype
+            
+            if ($discType -eq "BLURAY") {
+                Write-Host "  Source: Blu-ray (from metadata)" -ForegroundColor Cyan
+                return $PresetBluRay
+            } elseif ($discType -eq "DVD") {
+                Write-Host "  Source: DVD (from metadata)" -ForegroundColor Cyan
+                return $PresetDVD
+            }
+        } catch {
+            Write-Warning "  Failed to parse titleinfo.json: $($_.Exception.Message)"
+        }
+    }
+    
+    # Fallback: check for old .disctype file for backward compatibility
     $discTypeFile = Join-Path $ripFolder ".disctype"
     if (Test-Path $discTypeFile) {
         $discType = Get-Content $discTypeFile -Raw
         $discType = $discType.Trim()
         
         if ($discType -eq "BLURAY") {
-            Write-Host "  Source: Blu-ray (from metadata)" -ForegroundColor Cyan
+            Write-Host "  Source: Blu-ray (from legacy metadata)" -ForegroundColor Cyan
             return $PresetBluRay
         } elseif ($discType -eq "DVD") {
-            Write-Host "  Source: DVD (from metadata)" -ForegroundColor Cyan
+            Write-Host "  Source: DVD (from legacy metadata)" -ForegroundColor Cyan
             return $PresetDVD
         }
     }
     
     # Ultimate fallback: DVD preset
+    Write-Host "  Source: Unknown, using DVD preset" -ForegroundColor Yellow
     return $PresetDVD
 }
 New-Item -ItemType Directory -Force -Path $EncodedRoot | Out-Null
