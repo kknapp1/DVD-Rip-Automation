@@ -60,6 +60,20 @@ Get-ChildItem -Path $InboxRoot -Directory | ForEach-Object {
     $outFolder = Join-Path $EncodedRoot $ripName
     New-Item -ItemType Directory -Force -Path $outFolder | Out-Null
 
+    # Always copy additional asset files (excluding .mkv files)
+    Write-Host "Copying additional asset files for $ripName..." -ForegroundColor Cyan
+    $assetFiles = Get-ChildItem -Path $ripFolder -File | Where-Object { $_.Extension -ne ".mkv" }
+    
+    if ($assetFiles) {
+        foreach ($asset in $assetFiles) {
+            $destPath = Join-Path $outFolder $asset.Name
+            Copy-Item -Path $asset.FullName -Destination $destPath -Force
+            Write-Host "  Copied: $($asset.Name)" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "  No additional assets to copy" -ForegroundColor Gray
+    }
+
     $outFile = Join-Path $outFolder "$ripName.mp4"
 
     if (Test-Path $outFile) {
@@ -95,6 +109,7 @@ Get-ChildItem -Path $InboxRoot -Directory | ForEach-Object {
         --markers
 
     Write-Host "Finished $ripName"
+    
 }
 
 Write-Host "Encode pass complete."

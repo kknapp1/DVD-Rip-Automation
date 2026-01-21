@@ -82,6 +82,9 @@ $TitlePromptSeconds = $settings.TitlePromptSeconds
 $TMDbApiKey = $settings.TMDbApiKey
 $UseTMDbLookup = $settings.UseTMDbLookup
 
+# Cache for TMDb image base URL (fetched once per session)
+$script:TMDbImageBaseUrl = $null
+
 if (-not (Test-Path $MakeMKV)) {
     Write-Error "MakeMKV not found at $MakeMKV"
     exit 1
@@ -194,6 +197,90 @@ function Get-TMDbMovieDetails([int]$movieId) {
     }
 
     return $null
+}
+
+function Get-TMDbConfiguration {
+    if (-not $UseTMDbLookup -or $TMDbApiKey -eq "YOUR_TMDB_API_KEY_HERE") {
+        return $null
+    }
+
+    # Return cached value if already fetched
+    if ($script:TMDbImageBaseUrl) {
+        return $script:TMDbImageBaseUrl
+    }
+
+    try {
+        $url = "https://api.themoviedb.org/3/configuration?api_key=$TMDbApiKey"
+        $response = Invoke-RestMethod -Uri $url -Method Get -ErrorAction Stop
+        
+        if ($response.images -and $response.images.secure_base_url) {
+            $script:TMDbImageBaseUrl = $response.images.secure_base_url
+            Write-Host "TMDb image base URL: $script:TMDbImageBaseUrl" -ForegroundColor Cyan
+            return $script:TMDbImageBaseUrl
+        }
+    } catch {
+        Write-Warning "TMDb configuration lookup failed: $($_.Exception.Message)"
+    }
+
+    return $null
+}
+
+function Download-MoviePoster([string]$folderPath, [string]$posterPath) {
+    if (-not $UseTMDbLookup -or $TMDbApiKey -eq "YOUR_TMDB_API_KEY_HERE") {
+        return $false
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($posterPath)) {
+        Write-Host "  No poster path available" -ForegroundColor Yellow
+        return $false
+    }
+    
+    # Check if poster already exists
+    $existingPoster = Get-ChildItem -Path $folderPath -Filter "poster.*" -File -ErrorAction SilentlyContinue
+    if ($existingPoster) {
+        Write-Host "  Poster already exists: $($existingPoster.Name)" -ForegroundColor Gray
+        return $true
+    }
+    
+    # Get TMDb configuration for base URL
+    $baseUrl = Get-TMDbConfiguration
+    if (-not $baseUrl) {
+        Write-Warning "  Failed to get TMDb image base URL"
+        return $false
+    }
+    
+    try {
+        # Build the full poster URL (using 'original' size)
+        $posterUrl = "${baseUrl}original${posterPath}"
+        Write-Host "  Downloading poster from: $posterUrl" -ForegroundColor Cyan
+        
+        # Get the file extension from the poster path
+        $extension = [System.IO.Path]::GetExtension($posterPath)
+        if ([string]::IsNullOrWhiteSpace($extension)) {
+            $extension = ".jpg"  # Default to jpg if no extension
+        }
+        
+        # Create temporary file path
+        $tempFile = Join-Path $folderPath "poster_temp$extension"
+        $finalFile = Join-Path $folderPath "poster$extension"
+        
+        # Download the poster
+        Invoke-WebRequest -Uri $posterUrl -OutFile $tempFile -ErrorAction Stop
+        
+        # Rename to final name
+        Move-Item -Path $tempFile -Destination $finalFile -Force
+        
+        Write-Host "  Poster saved: poster$extension" -ForegroundColor Green
+        return $true
+    } catch {
+        Write-Warning "  Failed to download poster: $($_.Exception.Message)"
+        
+        # Clean up temp file if it exists
+        $tempFile = Join-Path $folderPath "poster_temp*"
+        Get-ChildItem -Path $tempFile -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        
+        return $false
+    }
 }
 
 function Get-ProposedTitle {
@@ -389,21 +476,53 @@ function Update-ExistingTitleInfo {
     $processed = 0
     $skipped = 0
     $updated = 0
+    $postersDownloaded = 0
     
     foreach ($folder in $folders) {
         $folderPath = $folder.FullName
         $folderName = $folder.Name
         $titleInfoFile = Join-Path $folderPath "titleinfo.json"
         
-        # Skip if titleinfo.json already exists
-        if (Test-Path $titleInfoFile) {
-            Write-Host "Skipping '$folderName' - titleinfo.json already exists" -ForegroundColor Gray
+        # Check if poster already exists
+        $existingPoster = Get-ChildItem -Path $folderPath -Filter "poster.*" -File -ErrorAction SilentlyContinue
+        
+        # If titleinfo.json exists and poster exists, skip this folder
+        if ((Test-Path $titleInfoFile) -and $existingPoster) {
+            Write-Host "Skipping '$folderName' - titleinfo.json and poster already exist" -ForegroundColor Gray
             $skipped++
             continue
         }
         
         Write-Host "Processing '$folderName'..." -ForegroundColor Yellow
         
+        # Case 1: titleinfo.json exists but no poster - just download poster
+        if (Test-Path $titleInfoFile) {
+            Write-Host "  titleinfo.json exists, fetching missing poster..." -ForegroundColor Cyan
+            
+            try {
+                $existingTitleInfo = Get-Content $titleInfoFile -Raw | ConvertFrom-Json
+                
+                if ($existingTitleInfo.poster_path) {
+                    $downloadSuccess = Download-MoviePoster -folderPath $folderPath -posterPath $existingTitleInfo.poster_path
+                    if ($downloadSuccess) {
+                        $postersDownloaded++
+                    }
+                } else {
+                    Write-Host "  No poster_path in titleinfo.json" -ForegroundColor Yellow
+                }
+                
+                $processed++
+                Write-Host ""
+                continue
+            } catch {
+                Write-Warning "  Failed to read titleinfo.json: $($_.Exception.Message)"
+                $skipped++
+                Write-Host ""
+                continue
+            }
+        }
+        
+        # Case 2: titleinfo.json doesn't exist - full lookup and create titleinfo.json + download poster
         # Try to parse year from folder name if present
         $searchTitle = $folderName
         $searchYear = $null
@@ -419,6 +538,7 @@ function Update-ExistingTitleInfo {
         if (-not $tmdbResult) {
             Write-Host "  No TMDb results found for '$searchTitle' - skipping" -ForegroundColor Yellow
             $skipped++
+            Write-Host ""
             continue
         }
         
@@ -431,6 +551,7 @@ function Update-ExistingTitleInfo {
         if (-not $detailedMovieData) {
             Write-Host "  Failed to fetch detailed movie info - skipping" -ForegroundColor Yellow
             $skipped++
+            Write-Host ""
             continue
         }
         
@@ -452,6 +573,18 @@ function Update-ExistingTitleInfo {
         # Save title info
         $titleInfo | ConvertTo-Json -Depth 10 | Set-Content -Path $titleInfoFile
         Write-Host "  Created titleinfo.json" -ForegroundColor Green
+        
+        # Download poster if available
+        if ($detailedMovieData.poster_path) {
+            Write-Host "  Fetching movie poster..." -ForegroundColor Cyan
+            $downloadSuccess = Download-MoviePoster -folderPath $folderPath -posterPath $detailedMovieData.poster_path
+            if ($downloadSuccess) {
+                $postersDownloaded++
+            }
+        } else {
+            Write-Host "  No poster available for this movie" -ForegroundColor Yellow
+        }
+        
         $updated++
         $processed++
         Write-Host ""
@@ -461,6 +594,7 @@ function Update-ExistingTitleInfo {
     Write-Host "Update complete!" -ForegroundColor Green
     Write-Host "  Processed: $processed"
     Write-Host "  Updated: $updated"
+    Write-Host "  Posters downloaded: $postersDownloaded"
     Write-Host "  Skipped: $skipped"
     Write-Host "============================"
 }
@@ -527,6 +661,12 @@ while ($true) {
         $titleInfoFile = Join-Path $jobDir "titleinfo.json"
         $titleInfo | ConvertTo-Json -Depth 10 | Set-Content -Path $titleInfoFile
         Write-Host "Saved title info to titleinfo.json" -ForegroundColor Cyan
+        
+        # Download poster if available
+        if ($titleInfo.poster_path) {
+            Write-Host "Downloading movie poster..." -ForegroundColor Cyan
+            Download-MoviePoster -folderPath $jobDir -posterPath $titleInfo.poster_path | Out-Null
+        }
 
         Write-Host "Disc detected in $($dvd.Drive). Ripping to $jobDir"
 
