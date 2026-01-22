@@ -67,8 +67,12 @@ Get-ChildItem -Path $InboxRoot -Directory | ForEach-Object {
     if ($assetFiles) {
         foreach ($asset in $assetFiles) {
             $destPath = Join-Path $outFolder $asset.Name
-            Copy-Item -Path $asset.FullName -Destination $destPath -Force
-            Write-Host "  Copied: $($asset.Name)" -ForegroundColor Green
+            if (-not (Test-Path $destPath)) {
+                Copy-Item -Path $asset.FullName -Destination $destPath -Force
+                Write-Host "  Copied: $($asset.Name)" -ForegroundColor Green
+            } else {
+                Write-Host "  Skipped: $($asset.Name) (already exists)" -ForegroundColor Gray
+            }
         }
     } else {
         Write-Host "  No additional assets to copy" -ForegroundColor Gray
